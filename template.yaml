@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  iam-key-checker
+
+  Sample SAM Template for iam-key-checker
+
+Parameters:
+  MaxKeyAge:
+    Type: String
+    Default: 90
+
+Resources:
+  KeyValidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/key_validation/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Timeout: 120
+      MemorySize: 128
+      Environment:
+        Variables:
+          MAX_KEY_AGE: !Ref MaxKeyAge
+
+  KeyValidationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${KeyValidationFunction}"
+      RetentionInDays: 3
+
+  NotificationSnsTopic:
+    Type: AWS::SNS::Topic
+
+  IamKeyCheckerStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: 'IAMKeyCheckerStateMachine'
+      DefinitionUri: state_machine/state_machine.asl.json
+      DefinitionSubstitutions:
+        KeyValidationFunction: !GetAtt KeyValidationFunction.Arn
+        NotificationSnsTopic: !Ref NotificationSnsTopic
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref KeyValidationFunction
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationSnsTopic.TopicName
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: 'IAMKeyCheckerStateMachine'
+        - Statement:
+          - Sid: SendEmailPermission
+            Effect: Allow
+            Action:
+              - iam:ListUsers
+              - iam:ListAccessKeys
+            Resource: '*'
+
+  IAMKeyCheckerScheduleExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ scheduler.amazonaws.com ]
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: IAMKeyChecker-SFExecution-Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - states:StartExecution
+                Effect: Allow
+                Resource: !GetAtt IamKeyCheckerStateMachine.Arn
+
+  IAMKeyCheckerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Triggers the AWS access key checker everyday
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Name: IAMKeyCheckerSchedule
+      ScheduleExpression: cron(0 8 * * ? *)
+      Target:
+        Arn: !GetAtt IamKeyCheckerStateMachine.Arn
+        RoleArn: !GetAtt IAMKeyCheckerScheduleExecutionRole.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 120
+          MaximumRetryAttempts: 2

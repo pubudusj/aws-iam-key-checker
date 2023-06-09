@@ -1,0 +1,92 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "ListUsers",
+  "States": {
+    "ListUsers": {
+      "Type": "Task",
+      "Parameters": {},
+      "Resource": "arn:aws:states:::aws-sdk:iam:listUsers",
+      "Next": "Map",
+      "ResultSelector": {
+        "Users.$": "$.Users"
+      }
+    },
+    "Map": {
+      "Type": "Map",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "EXPRESS"
+        },
+        "StartAt": "ListAccessKeys",
+        "States": {
+          "ListAccessKeys": {
+            "Type": "Task",
+            "Parameters": {
+              "UserName.$": "$.UserName"
+            },
+            "Resource": "arn:aws:states:::aws-sdk:iam:listAccessKeys",
+            "End": true,
+            "ResultSelector": {
+              "AccessKeys.$": "$.AccessKeyMetadata"
+            }
+          }
+        }
+      },
+      "Next": "KeyValidationLambda",
+      "ItemsPath": "$.Users",
+      "Label": "Map",
+      "MaxConcurrency": 1000
+    },
+    "KeyValidationLambda": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${KeyValidationFunction}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "HasResults"
+    },
+    "HasResults": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.count",
+          "NumericGreaterThan": 0,
+          "Next": "SNS Publish"
+        }
+      ],
+      "Default": "Pass"
+    },
+    "Pass": {
+      "Type": "Pass",
+      "End": true
+    },
+    "SNS Publish": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${NotificationSnsTopic}",
+        "Message": {
+          "message": "Below keys are created more than 90 days ago. Please rotate them.",
+          "keys.$": "$.accessKeys"
+        }
+      },
+      "End": true
+    }
+  }
+}
